@@ -1,0 +1,23 @@
+we are using our mcp server crawl4ai-rag to crawl entire web sites the whole site map. i'm having an issue wioth open ai no liking the smart_crawl_url . it hits the 2000 token limit , we need to implement our code to use token logic when smart crawling . there is no user interaction this will run automanously . so don't make it so you can change variabes. line 271 of crawl4ai_mcp.py has the max depth and chunk size . We need some logic to stop our crawl using too many tokens . I'm happy for the smart crawl to identify its a large site and to crawl one url at a time, if it detecks links inside the url it can crawl the links one by one. take a look at the code and see if you can implement this slowler more relaible method of gathering the site urls. 
+
+1. **`crawl_single_page`**: Quickly crawl a single web page and store its content in the vector database
+2. **`smart_crawl_url`**: Intelligently crawl a full website based on the type of URL provided (sitemap, llms-full.txt, or a regular webpage that needs to be crawled recursively)
+3. **`get_available_sources`**: Get a list of all available sources (domains) in the database
+4. **`perform_rag_query`**: Search for relevant content using semantic search with optional source filtering
+
+
+docker build -t mcp/crawl4ai-rag --build-arg PORT=8051 .
+
+docker run --env-file .env -p 8051:8051 mcp/crawl4ai-rag
+
+# Stop all services
+docker compose -p localai -f docker-compose.yml --profile gpu-nvidia down
+
+# Pull latest versions of all containers
+docker compose -p localai -f docker-compose.yml --profile gpu-nvidia pull
+
+# Start services again with your desired profile
+python start_services.py --profile gpu-nvidia
+
+
+{"url": "https://docs.alpaca.markets/reference/getfundingwallettransferbyid", "source": "docs.alpaca.markets", "headers": "# Retrieve funding wallet transfer by ID; ## Developers; ## About Us; ## Disclosures", "char_count": 3388, "chunk_size": 3724, "crawl_time": "_handle_message", "crawl_type": "webpage", "word_count": 251, "chunk_index": 7, "contextual_embedding": true}
