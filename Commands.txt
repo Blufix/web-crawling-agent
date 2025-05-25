@@ -1,3 +1,8 @@
+git init
+
+git remote add origin https://github.com/Blufix/web-crawling-agent.git
+git remote add origin https://github.com/Blufix/public-files.git
+
 we are using our mcp server crawl4ai-rag to crawl entire web sites the whole site map. i'm having an issue wioth open ai no liking the smart_crawl_url . it hits the 2000 token limit , we need to implement our code to use token logic when smart crawling . there is no user interaction this will run automanously . so don't make it so you can change variabes. line 271 of crawl4ai_mcp.py has the max depth and chunk size . We need some logic to stop our crawl using too many tokens . I'm happy for the smart crawl to identify its a large site and to crawl one url at a time, if it detecks links inside the url it can crawl the links one by one. take a look at the code and see if you can implement this slowler more relaible method of gathering the site urls. 
 
 1. **`crawl_single_page`**: Quickly crawl a single web page and store its content in the vector database
@@ -9,6 +14,7 @@ we are using our mcp server crawl4ai-rag to crawl entire web sites the whole sit
 docker build -t mcp/crawl4ai-rag --build-arg PORT=8051 .
 
 docker run --env-file .env -p 8051:8051 mcp/crawl4ai-rag
+
 
 # Stop all services
 docker compose -p localai -f docker-compose.yml --profile gpu-nvidia down
