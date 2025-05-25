@@ -24,6 +24,7 @@ import tiktoken
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode, MemoryAdaptiveDispatcher
 from utils import get_supabase_client, add_documents_to_supabase, search_documents
+import openai
 
 # Initialize the tokenizer for token counting
 ENCODING_MODEL = "cl100k_base"  # Model used by OpenAI for GPT-4 and text-embedding-3-*
@@ -298,6 +299,33 @@ async def crawl_single_page(ctx: Context, url: str) -> str:
             "error": str(e)
         }, indent=2)
 
+async def safe_process_and_store_batch(
+    supabase_client: Client,
+    crawl_results: List[Dict[str, Any]],
+    crawl_type: str,
+    chunk_size: int,
+    max_retries: int = 3,
+) -> int:
+    """Wrapper around process_and_store_batch with retry logic."""
+    for attempt in range(max_retries):
+        try:
+            return await process_and_store_batch(
+                supabase_client, crawl_results, crawl_type, chunk_size
+            )
+        except openai.RateLimitError as e:
+            wait = 5 * (attempt + 1)
+            print(
+                f"Rate limit when storing batch. Waiting {wait}s before retry..."
+            )
+            await asyncio.sleep(wait)
+        except Exception as e:
+            if attempt >= max_retries - 1:
+                raise
+            wait = 3 * (attempt + 1)
+            print(f"Error storing batch: {e}. Retrying in {wait}s...")
+            await asyncio.sleep(wait)
+
+
 @mcp.tool()
 async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concurrent: int = 10, chunk_size: int = 5000) -> str:
     """
@@ -376,7 +404,9 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
                     accumulated_results.extend(batch_results)
                     
                     # Process and store this batch immediately
-                    batch_tokens = process_and_store_batch(supabase_client, batch_results, crawl_type, chunk_size)
+                    batch_tokens = await safe_process_and_store_batch(
+                        supabase_client, batch_results, crawl_type, chunk_size
+                    )
                     
                     # Check token usage and apply rate limiting if needed
                     total_tokens_used += batch_tokens
@@ -441,7 +471,9 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
                 # The final batch may still need to be saved if not already saved in the function
                 # We'll check if this final batch has already been saved inside the function
                 if hasattr(results, 'needs_final_save') and results.needs_final_save:
-                    total_tokens_used += process_and_store_batch(supabase_client, results, crawl_type, chunk_size)
+                    total_tokens_used += await safe_process_and_store_batch(
+                        supabase_client, results, crawl_type, chunk_size
+                    )
         
         if not all_crawl_results:
             return json.dumps({
@@ -778,7 +810,9 @@ async def crawl_recursive_internal_links_with_token_limit(
                 batch_size = len(pending_save_batch)
                 print(f"Saving {batch_size} crawled pages to Supabase...")
                 # Save the pending batch to Supabase
-                tokens_used = process_and_store_batch(supabase_client, pending_save_batch, crawl_type, chunk_size)
+                tokens_used = await safe_process_and_store_batch(
+                    supabase_client, pending_save_batch, crawl_type, chunk_size
+                )
                 print(f"Saved {batch_size} pages, tokens used: {tokens_used}")
                 # Mark these URLs as saved
                 for item in pending_save_batch:
@@ -799,7 +833,9 @@ async def crawl_recursive_internal_links_with_token_limit(
     # Final save of any remaining data
     if supabase_client and pending_save_batch:
         print(f"Final save: saving {len(pending_save_batch)} remaining crawled pages to Supabase...")
-        process_and_store_batch(supabase_client, pending_save_batch, crawl_type, chunk_size)
+        await safe_process_and_store_batch(
+            supabase_client, pending_save_batch, crawl_type, chunk_size
+        )
         # Mark that there's no need for a final save in the caller
         results = []  # Create a new list to be able to add attributes
         results.extend(results_all)
