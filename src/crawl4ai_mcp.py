@@ -337,7 +337,9 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
     - For regular webpages: Recursively crawls internal links with token limit awareness
     
     All crawled content is chunked and stored in Supabase for later retrieval and querying.
-    The crawling process is now token-aware to prevent hitting OpenAI's token limits.
+    The crawling process stores results in batches, saving every 100 URLs or
+    whenever the estimated tokens for the pending batch exceeds 200k to stay
+    within OpenAI's token-per-minute limits.
     
     Args:
         ctx: The MCP server provided context
@@ -345,7 +347,7 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
         max_depth: Maximum recursion depth for regular URLs (default: 3)
         max_concurrent: Maximum number of concurrent browser sessions (default: 10)
         chunk_size: Maximum size of each content chunk in characters (default: 5000)
-    
+
     Returns:
         JSON string with crawl summary and storage information
     """
@@ -461,7 +463,9 @@ async def smart_crawl_url(ctx: Context, url: str, max_depth: int = 3, max_concur
                 max_tpm=max_tpm,
                 supabase_client=supabase_client,  # Pass supabase client for periodic saving
                 chunk_size=chunk_size,           # Pass chunk size for processing
-                crawl_type=crawl_type            # Pass crawl type for proper categorization
+                crawl_type=crawl_type,           # Pass crawl type for proper categorization
+                max_urls_per_save=100,           # Save after 100 URLs
+                max_tokens_per_save=max_tpm      # Respect overall token limit
             )
             
             if results:
@@ -682,16 +686,18 @@ async def crawl_recursive_internal_links(crawler: AsyncWebCrawler, start_urls: L
     return results_all
 
 async def crawl_recursive_internal_links_with_token_limit(
-    crawler: AsyncWebCrawler, 
-    start_urls: List[str], 
-    max_depth: int = 3, 
+    crawler: AsyncWebCrawler,
+    start_urls: List[str],
+    max_depth: int = 3,
     max_concurrent: int = 10,
     max_tokens: int = 1800,
     max_batch_size: int = 10,
     max_tpm: int = 200000,
     supabase_client = None,  # Added parameter for Supabase client
     chunk_size: int = 5000,  # Added parameter for chunk size
-    crawl_type: str = "webpage"  # Added parameter for crawl type
+    crawl_type: str = "webpage",  # Added parameter for crawl type
+    max_urls_per_save: int = 100,  # New parameter controlling save batch size
+    max_tokens_per_save: int = 200000  # New parameter controlling save token limit
 ) -> List[Dict[str, Any]]:
     """
     Recursively crawl internal links with token limit awareness.
@@ -707,6 +713,8 @@ async def crawl_recursive_internal_links_with_token_limit(
         supabase_client: Supabase client for periodic saving
         chunk_size: Maximum size of each content chunk
         crawl_type: Type of crawl (webpage, sitemap, text_file)
+        max_urls_per_save: Save to Supabase after this many URLs are crawled
+        max_tokens_per_save: Save to Supabase if estimated tokens exceed this value
         
     Returns:
         List of dictionaries with URL and markdown content
@@ -727,6 +735,8 @@ async def crawl_recursive_internal_links_with_token_limit(
     save_interval = 300  # Save at least every 5 minutes regardless of TPM limits
     pending_save_batch = []  # Track results that need to be saved
     already_saved_urls = set()  # Track URLs already saved to prevent duplicates
+    tokens_since_save = 0  # Track estimated tokens since last save
+    url_count_since_save = 0  # Track number of URLs since last save
 
     def normalize_url(url):
         return urldefrag(url)[0]
@@ -783,6 +793,8 @@ async def crawl_recursive_internal_links_with_token_limit(
                 # Add to pending save batch if we have Supabase client
                 if supabase_client and result.url not in already_saved_urls:
                     pending_save_batch.append(result_data)
+                    tokens_since_save += content_tokens
+                    url_count_since_save += 1
                 
                 # Collect internal links for next depth level
                 current_depth = next((d for u, d in to_visit_queue if normalize_url(u) == normalize_url(result.url)), 0)
@@ -804,22 +816,28 @@ async def crawl_recursive_internal_links_with_token_limit(
         if elapsed_seconds > 0:
             current_tpm = (current_token_estimate / elapsed_seconds) * 60
             print(f"Current TPM: {current_tpm:.2f} tokens/minute (Limit: {max_tpm})")
-            
-            # If we need to save data (time interval or TPM limit approaching)
-            if supabase_client and pending_save_batch and (time_to_save or current_tpm > max_tpm * 0.7):
+
+            save_due_to_size = (
+                len(pending_save_batch) >= max_urls_per_save
+                or tokens_since_save >= max_tokens_per_save
+            )
+
+            # If we need to save data (time, TPM, or batch size/token limit)
+            if supabase_client and pending_save_batch and (
+                time_to_save or current_tpm > max_tpm * 0.7 or save_due_to_size
+            ):
                 batch_size = len(pending_save_batch)
                 print(f"Saving {batch_size} crawled pages to Supabase...")
-                # Save the pending batch to Supabase
                 tokens_used = await safe_process_and_store_batch(
                     supabase_client, pending_save_batch, crawl_type, chunk_size
                 )
                 print(f"Saved {batch_size} pages, tokens used: {tokens_used}")
-                # Mark these URLs as saved
                 for item in pending_save_batch:
                     already_saved_urls.add(item['url'])
-                # Clear the pending save batch
                 pending_save_batch = []
                 last_save_time = time.time()
+                tokens_since_save = 0
+                url_count_since_save = 0
             
             # If we're approaching TPM limits, apply brief pause
             if current_tpm > max_tpm * 0.8:  # 80% of our TPM limit
@@ -836,6 +854,8 @@ async def crawl_recursive_internal_links_with_token_limit(
         await safe_process_and_store_batch(
             supabase_client, pending_save_batch, crawl_type, chunk_size
         )
+        tokens_since_save = 0
+        url_count_since_save = 0
         # Mark that there's no need for a final save in the caller
         results = []  # Create a new list to be able to add attributes
         results.extend(results_all)
